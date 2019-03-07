@@ -1,0 +1,263 @@
+---
+title: "How I Learned to Stop Worrying and Love Spark"
+output: 
+    prettydoc::html_pretty:
+        theme: architect
+        highlight: vignette
+---
+
+## Part One: Introduction
+
+R is great. But working with large data sets can prove frustrating. RAM limitations can severly impede performance, or prevent analysis altogether if the data does not fit into memory. Sparklyr solves this problem by providing a full-featured interface to Spark, allowing R users to work with truly huge data. Spark can be configured to work on a local filesystem, but to experience its true power and functionality, it is best to connect to a Spark cluster. Typically, this consists of a master node and some number of worker nodes that share resources via a management engine such as Yarn, Mesos, or Kubernetes. Data is distributed across the cluster and computation is performed in parallel. With a large enough cluster, Spark can process several petabytes of data at lightning fast speeds. 
+
+Setting up a Spark cluster in the cloud can seem daunting, but it's not. Cloud providers like Google and Amazon offer pre-configured Spark clusters and genereous free trials. There will always be some configuration hurdles, but the following instructions should sufficiently de-mystify the process. One does not need to be a computer scientist to utilize Spark for a big data project.
+
+This walkthrough is specific to the Google Cloud Platform. The user interface is simple, new users get $300 in free credits, and their Dataproc offering needs just a bit of fine tuning to work with sparklyr and RStudio.
+
+
+## Part Two: Deploy a Dataproc Instance
+
+Navigate to https://cloud.google.com, open the console, and create a new project. From the navigate menu in the upper left, scroll down to "big data" and select Dataproc > clusters. Enable the API, and then create a cluster. Various options are presented for configuring the CPUs, disk size, instance type, and location of your cluster. The options selected here will depend on the specifications and requirements of the project. The cluster can always be resized later.
+
+It is a good idea to install the Google Cloud SDK. The software provides a set of command line tools for managing your cluster from a local shell. While this step is not necessary (Google provides a browser-based shell), it does make certain tasks easier. The following commands are specific to Ubuntu/Debian. Customized instructions for your machine can be found at https://cloud.google.com/sdk/.
+
+```{BASH, eval = FALSE}
+# Create environment variable for correct distribution
+export CLOUD_SDK_REPO="cloud-sdk-$(lsb_release -c -s)"
+
+# Add the Cloud SDK distribution URI as a package source
+echo "deb http://packages.cloud.google.com/apt $CLOUD_SDK_REPO main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+
+# Import the Google Cloud Platform public key
+curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+
+# Update the package list and install the Cloud SDK
+sudo apt-get update && sudo apt-get install google-cloud-sdk
+```
+
+Run the `gcloud init` command to initialize the tools and connect to your GCP account.
+
+## Part Three: Install R & RStudio Server
+
+Google Dataproc clusters do not come with RStudio pre-installed. In order to use sparklyr to execute code and manage data, RStudio will have to be installed manually. Thankfully, this is a simple task. First, establish an SSH session from your local machine to the cluster's master node. This can be accomplished locally, or via GCP's browser-based shell. The following command establishes an SSH session from a local shell using the Google Cloud SDK command line tools. 
+
+```{BASH, eval = FALSE}
+# Basic syntax of the gcloud command to establish an SSH session
+gcloud compute ssh --zone=[CLUSTER_ZONE] --project=[PROJECT_ID] [CLUSTER_NAME]-m
+
+# For example...
+gcloud compute ssh --zone=us-east1-b --project=my_spark_project spark_cluster-m
+```
+
+Next, install R and the necessary dependencies.
+
+```{BASH, eval = FALSE}
+# Update repos
+sudo apt-get update
+
+# Install R & dependencies
+sudo apt-get install -y r-base r-base-dev libcurl4-openssl-dev libssl-dev libxml2-dev
+```
+
+RStudio Server can now be installed. Just follow the instructions for Debian 9+ (64-bit) on Rstudio's [website](https://www.rstudio.com/products/rstudio/download-server/). The following commands will change as new versions are released, so it is best to check the website first.
+
+```{BASH, eval = FALSE}
+sudo apt-get install gdebi-core
+wget https://download2.rstudio.org/rstudio-server-stretch-1.1.463-amd64.deb
+sudo gdebi rstudio-server-stretch-1.1.463-amd64.deb
+```
+
+To access RStudio Server, you must first create a user account. The following command will create a user called "rstudio". You will then be prompted to create the password for the new account.
+
+```{BASH, eval = FALSE}
+sudo adduser rstudio
+```
+
+## Part Four: Connect to RStudio Server
+
+There are two options for connecting to the RStudio web UI: TCP port forwarding, and dynamic port forwarding with SOCKS. The former is simpler, but you will only have access to the RStudio interface. As you are forwarding traffic from a single local port to a port on the host machine (The RStudio web UI port), you will not be able to view the Spark UI, the HDFS NameNode web UI, the YARN resource manager, or any other web interfaces hosted on the Dataproc cluster. Using SOCKS is a bit more complicated, but you will be able to access all of the aforementioned resources.
+
+To set up TCP port forwarding, execute the following in a local shell.
+
+```{BASH, eval = FALSE}
+# Basic syntax of the gcloud command to set up TCP port forwarding
+gcloud compute ssh --zone=[CLUSTER_ZONE] --project=[PROJECT_ID] [CLUSTER_NAME]-m -- -L 8787:localhost:8787
+
+# For example...
+gcloud compute ssh --zone=us-east1-b --project=my_spark_project spark_cluster-m -- -L 8787:localhost:8787
+```
+
+Once the SSH tunnel is open, you will have to prevent the session from timing out due to inactivity. If the session times out, you will lose the connection to RStudio server. A simple means of accomplishing this is to automatically execute a simple command every five or ten minutes. The following will print the date every 400 seconds. This will prevent the session from timing out. There are probably more sophisticated means of keeping an SSH tunnel open, but this gets the job done simply.
+
+```{BASH, eval = FALSE}
+while true; do date; sleep 400; done
+```
+
+To set up dynamic port forwarding with SOCKS, you must first create an SSH SOCKS proxy and then open a specially configured browser session that routes traffic through the proxy. The following example opens the browser session in Chrome and is specific to a Linux environment. Instructions for other operating systems can be found on Google's [website](https://cloud.google.com/dataproc/docs/concepts/accessing/cluster-web-interfaces#connecting_to_web_interfaces).
+
+The choice of port 1080 is arbitrary. Any unused port will do.
+
+```{BASH, eval = FALSE}
+# Create SSH SOCKS proxy
+gcloud compute ssh [CLUSTER_NAME]-m --project=[PROJECT_ID] --zone=[CLUSTER_ZONE]  -- -D 1080 -N
+
+# Create Chrome session that routes traffic through the proxy
+/usr/bin/google-chrome --proxy-server="socks5://localhost:1080" --user-data-dir=/tmp/[CLUSTER_NAME]-m
+```
+
+Now, we can connect to RStudio Server and start working with Spark. If you configured the SOCKS proxy, the port number can be changed to access other web UIs (Spark UI = 8080, Yarn resource manager = 8088, HDFS NameNode = 9870).
+
+```{BASH, eval = FALSE}
+# URL for TCP port forwarding
+http://localhost:8787
+
+# URL for SOCKS proxy
+http://[CLUSTER_NAME]-m:8787
+```
+
+## Part Five: Load Data & Connect to Spark
+
+Now that RStudio Server is available via a web browser, we can begin setting up our analysis environment. Install sparklyr and any other packages you want to use now.
+
+```{r, eval = FALSE}
+# For example
+install.packages('sparklyr', 'tidyverse')
+```
+
+The next step is to acquire some data and copy it onto HDFS. As we're running a Yarn-managed Spark cluster, our data needs to be distributed across all the nodes in the cluster. Spark will not read data from the ext4 file system on the master node. If you use download.file() to pull some data to the home directory, Spark will not be able to see it. As such, we have a couple additional hoops to jump through.
+
+Google's Dataproc clusters come with a cloud storage bucket that is accessible to the cluster. You can use the GCP console to transfer data to the bucket and then copy it onto HDFS. You could also use R's download.file() function to pull data to your home directory and then copy to HDFS. Or, you can jump to the terminal and use wget to grab files from the web. Regardless of the approach, the process used to copy the data to HDFS is the same. The following two examples illustrate the bucket method and the wget method for downloading data. Both should be executed in the terminal pane of the Rstudio UI.
+
+```{BASH, eval = FALSE}
+# Use wget to download Chicago crime data
+wget -O /home/rstudio/crimes.csv https://data.cityofchicago.org/api/views/ijzp-q8t2/rows.csv?accessType=DOWNLOAD
+
+# Pull data from Google cloud storage bucket
+gsutil cp gs://[BUCKET_NAME]/[OBJECT_NAME] /home/rstudio/
+```
+
+Copy the data to HDFS.
+
+```{BASH, eval = FALSE}
+# Create a directory on HDFS for the data
+hadoop fs -mkdir /user/rstudio/crimes/
+
+# Copy the data to HDFS
+hadoop fs -put /home/rstudio/crimes.csv /user/rstudio/crimes
+```
+
+A few environment variables need to be set before we can begin to analyze the data that is distributed across the cluster. Sparklyr needs to know the location of the Spark binaries, the Hadoop configuration directory, and the Yarn configuration directory. It also needs to know the location of the Java home directory, but that is pre-configured on the Dataproc cluster. If you're running Spark locally, that variable will need to be set as well.
+
+Set the variables in your R session as follows. Load the sparklyr library first to make the spark_home_set() function available. Any other required libraries can be loaded as well.
+
+```{r, eval = FALSE}
+library(tidyverse)
+library(sparklyr)
+
+spark_home_set('/usr/lib/spark/')
+Sys.setenv(HADOOP_CONF_DIR = '/etc/hadoop/conf')
+Sys.setenv(YARN_CONF_DIR = '/etc/hadoop/conf')
+```
+
+By default, Spark is confgured to use only 60% of the available RAM. The purpose of this config is to set aside memory for internal metadata, user data structures, and imprecise size estimation in the case of sparse, unusually large records. To make more RAM available for caching and processing data (especially on smaller clusters), I typically set it to 80%.
+
+```{r, eval = FALSE}
+spark_conf <- spark_config()
+spark_conf$`spark.memory.fraction` <- 0.8
+```
+
+With the environment and configuration properly set, a connection to Spark can be established and data can be loaded (cached) into memory. The caching step can take some time, depending on the size of your data.
+
+```{r, eval = FALSE}
+sc <- spark_connect(master = "yarn-client", version = "2.3.2", config = spark_conf)
+
+crimes_tbl <- spark_read_csv(sc, "crimes", "/user/rstudio/crimes/crimes.csv")
+```
+
+Loading data can be accelerated by providing column names and types to the spark_read_ functions. When Spark does not have to infer the schema, data is loaded more quickly.
+
+```{r, eval = FALSE}
+crime_cols <- read.csv('crimes.csv', nrows = 100, stringsAsFactors = FALSE) %>%
+  map_chr(function(x) typeof(x))
+
+crimes_tbl2 <- spark_read_csv(sc, 
+                             name = "crimes2", 
+                             path = "/user/rstudio/crimes/crimes.csv", 
+                             memory = TRUE, 
+                             columns = crime_cols, 
+                             infer_schema = FALSE)
+```
+
+At this point, you can proceed to analyze your data using standard dlpyr workflows, just as if you were connected to any other database. Collect() will return results to the R session, and compute() will cache the results of a dplyr pipeline as a new Spark dataframe.
+
+Beyond standard dplyr pipelines, which query the Spark dataframes with Spark SQL, sparklyr offers other methods of interacting with data in Spark. You can implement Spark's native modeling functions, including feature transformers and machine learning algorithms. Sparklyr provides a set of sdf_ functions that access the Spark dataframe API directly, though this set of functions forces any pending Spark SQL in a dplyr pipeline to be executed. You can also use Hive functions, plugging them into R code like any other function call (a list of Hive functions can be foud [here](https://cwiki.apache.org/confluence/display/Hive/LanguageManual+UDF)). Rstudio has excellent online resources that cover these topics in explicit detail.
+
+* Spark webinars:
+    + https://www.rstudio.com/resources/webinars/#sparklyr
+* Sparklyr documentation and examples:
+    + https://spark.rstudio.com/
+    
+Rather than try to cover all of the important topics in the aforementioned resources, I will instead highlight a few of the more useful (and interesting) features of sparklyr.
+
+## Part Six: Using Sparklyr
+
+Sparklyr is fully integrated into the tidyverse. Simply create a Spark connection and run code as you would with any other database. Standard dplyr pipelines are translated into Spark SQL and are not executed until collect() is called.
+
+```{r, eval = FALSE}
+# collect results of analysis in R
+crimes_by_category_R <- crimes_tbl %>%
+  group_by(Primary_Type) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  collect()
+
+# store results of analysis in Spark dataframe
+crimes_by_category_Spark <- crimes_tbl %>%
+  group_by(Primary_Type) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) %>%
+  compute(name = 'crimes_by_cat')
+```
+
+The spark_apply() function can be used to apply any R code to a Spark dataframe (provided R is installed on every node in the cluster). When interacting with databases, one is typically limited to the common set of dplyr verbs, but spark_apply() allows you to integrate tidyr, broom, purrr, or any other package into your workflow.
+
+```{r, eval = FALSE}
+# create mtcars model with spark_apply
+mtcars_tbl <- copy_to(sc, mtcars, overwrite = TRUE)
+
+mtcars_model <- spark_apply(
+  mtcars_tbl,
+  function(dataset) broom::tidy(lm(mpg ~ hp + wt, dataset)),
+  group_by = "cyl") %>% 
+  collect()
+```
+
+Spark_apply() can be slow, esecially when compared to functions that generate Spark SQL or interact directly with the Spark API. Thankfully, sparklyr includes a wide array of Spark-native machine learning and data transformation functions. The linear model created above can be reproduced, with some additional details, using the sdf_ and ml_ function families.
+
+```{r, eval = FALSE}
+# create mtcars model with native Spark functions
+model_partition <- mtcars_tbl %>% 
+  sdf_partition(train = 0.75, valid = 0.25, seed = 1234)
+
+mtcars_model2 <- model_partition$train %>%
+  ml_linear_regression(mpg ~ cyl + hp + wt)
+
+summary(mtcars_model2)
+
+mtcars_model2_results <- broom::tidy(mtcars_model2)
+
+mtcars_model2_predictions <- sdf_predict(model_partition$valid, mtcars_model2) %>% 
+    collect()
+```
+
+Sparklyr also supports Hive functions. This set of functions can be integrated directly into dplyr pipelines. A complete list can be found in the Hive documentation [here](https://cwiki.apache.org/confluence/display/Hive/LanguageManual+UDF).
+
+```{r, eval = FALSE}
+# Hive functions (hash)
+crimes_tbl %>%
+  filter(Ward == 28) %>%
+  mutate(case_num = hash(Case_Number)) %>%
+  compute("crimes_in_28")
+```
+
+This brief overview of sparklyr is hardly comprehensive. As stated previously, there are many online resources that cover the topic in much greater detail. If you have a big data project, I strongly encourage you to check them out (the links are in part five). If you don't, hopefully this introduction has sparked some interest in the topic. Most likely, you've got $300 in free Google cloud credits. Find a large dataset and start exploring.
